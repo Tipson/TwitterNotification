@@ -1,22 +1,31 @@
-﻿using System.Text.Json;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Telegram.Bot;
 using Telegram.Bot.Args;
 using Telegram.Bot.Types.Enums;
-using File = System.IO.File;
 
 namespace TwitterNotification;
 
 class Program
 {
+        
     private static readonly HttpClient Client = new();
     private static Dictionary<string, string> _lastTweetIds = new();
     private static TelegramBotClient _telegramBotClient = null!;
     private static readonly string ConfigFilePath = "config.json";
+    private static readonly string RapidApiKey = "e8442987admshd0a8163b2ed4581p1db1ebjsn930d523ec288";
+    private static readonly string TelegramBotToken = "6013028944:AAEHHHbNp4ji1iZhzSqam91rJfv8gwOmPwM";
+    private static readonly string TelegramChatId = "-1001892825679";
 
     static async Task Main()
     {
         // Initialize and start the Telegram bot
-        _telegramBotClient = new TelegramBotClient("6013028944:AAEHHHbNp4ji1iZhzSqam91rJfv8gwOmPwM");
+        _telegramBotClient = new TelegramBotClient(TelegramBotToken);
         _telegramBotClient.OnMessage += Bot_OnMessage;
         _telegramBotClient.StartReceiving();
 
@@ -30,11 +39,8 @@ class Program
                 {
                     string newTweetId = await GetLatestTweetId(username);
 
-                    if (string.IsNullOrEmpty(_lastTweetIds[username]) || newTweetId != _lastTweetIds[username])
+                    if (!string.IsNullOrEmpty(newTweetId))
                     {
-                        string message = $"Новый твит опубликован от аккаунта {username}!";
-                        Console.WriteLine(message);
-                        await SendTelegramMessage(message); // Отправка уведомления в Telegram
                         _lastTweetIds[username] = newTweetId;
                     }
                 }
@@ -44,7 +50,7 @@ class Program
                 Console.WriteLine($"Ошибка при получении твита: {ex.Message}");
             }
 
-            await Task.Delay(TimeSpan.FromMinutes(30)); 
+            await Task.Delay(TimeSpan.FromSeconds(10));
         }
     }
 
@@ -58,7 +64,7 @@ class Program
             RequestUri = new Uri(url),
             Headers =
             {
-                { "X-RapidAPI-Key", "e8442987admshd0a8163b2ed4581p1db1ebjsn930d523ec288" },
+                { "X-RapidAPI-Key", RapidApiKey },
                 { "X-RapidAPI-Host", "twitter154.p.rapidapi.com" }
             }
         };
@@ -68,23 +74,41 @@ class Program
             response.EnsureSuccessStatusCode();
             var body = await response.Content.ReadAsStringAsync();
 
+            Console.WriteLine(body); // Вывод полного JSON-ответа
+
             string tweetId = ParseLatestTweetIdFromBody(body);
-            return tweetId;
+            string lastTweetId = _lastTweetIds[username];
+
+            if (tweetId != lastTweetId)
+            {
+                SendTelegramMessage(username, tweetId);
+                return tweetId;
+            }
+
+            return string.Empty;
         }
     }
 
     static string ParseLatestTweetIdFromBody(string responseBody)
     {
-        int startIndex = responseBody.IndexOf("\"tweet_id\":") + 12;
-        int endIndex = responseBody.IndexOf("\"", startIndex);
-        string tweetId = responseBody.Substring(startIndex, endIndex - startIndex);
-        return tweetId;
+        var jsonDocument = JsonDocument.Parse(responseBody);
+        var resultsArray = jsonDocument.RootElement.GetProperty("results");
+
+        if (resultsArray.GetArrayLength() > 0)
+        {
+            var tweetId = resultsArray[0].GetProperty("tweet_id").GetString(); // Получение tweetId
+            return tweetId;
+        }
+
+        return string.Empty;
     }
 
-    static async Task SendTelegramMessage(string message)
+    static async Task SendTelegramMessage(string username, string tweetId)
     {
-        // Отправка сообщения в Telegram
-        await _telegramBotClient.SendTextMessageAsync("-1001892825679", message);
+        string tweetUrl = $"https://twitter.com/{username}/status/{tweetId}";
+        string message = $"@{username}{Environment.NewLine}Открыть твит: {tweetUrl}";
+
+        await _telegramBotClient.SendTextMessageAsync(TelegramChatId, message);
     }
 
     static async void Bot_OnMessage(object? sender, MessageEventArgs e)
