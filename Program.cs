@@ -13,7 +13,7 @@ class Program
     private static TelegramBotClient _telegramBotClient = null!;
     private static readonly string ConfigFilePath = "config.json";
 
-    static async Task Main(string[] args)
+    static async Task Main()
     {
         // Initialize and start the Telegram bot
         _telegramBotClient = new TelegramBotClient("6013028944:AAEHHHbNp4ji1iZhzSqam91rJfv8gwOmPwM");
@@ -44,7 +44,7 @@ class Program
                 Console.WriteLine($"Ошибка при получении твита: {ex.Message}");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(100)); // Пауза в 10 секунд перед следующей проверкой
+            await Task.Delay(TimeSpan.FromMinutes(30)); 
         }
     }
 
