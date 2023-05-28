@@ -1,62 +1,70 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Text.Json;
-using System.Threading.Tasks;
+﻿using System.Text.Json;
 using Telegram.Bot;
 using Telegram.Bot.Args;
 using Telegram.Bot.Types.Enums;
+using Microsoft.Extensions.Configuration;
 
 namespace TwitterNotification;
 
 class Program
 {
-        
     private static readonly HttpClient Client = new();
     private static Dictionary<string, string> _lastTweetIds = new();
     private static TelegramBotClient _telegramBotClient = null!;
-    private static readonly string ConfigFilePath = "config.json";
-    private static readonly string RapidApiKey = "e8442987admshd0a8163b2ed4581p1db1ebjsn930d523ec288";
-    private static readonly string TelegramBotToken = "6013028944:AAEHHHbNp4ji1iZhzSqam91rJfv8gwOmPwM";
-    private static readonly string TelegramChatId = "-1001892825679";
+    private static IConfiguration? Configuration { get; set; }
+    private static string _rapidApiKey = string.Empty;
+    private static string _telegramChatId = string.Empty;
 
     static async Task Main()
     {
-        // Initialize and start the Telegram bot
-        _telegramBotClient = new TelegramBotClient(TelegramBotToken);
+        var builder = new ConfigurationBuilder()
+            .SetBasePath(Directory.GetCurrentDirectory())
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+
+        Configuration = builder.Build();
+
+        _rapidApiKey = Configuration["RapidApiKey"];
+        string telegramBotToken = Configuration["TelegramBotToken"];
+        _telegramChatId = Configuration["TelegramChatId"];
+        string configFilePath = Configuration["ConfigFilePath"];
+
+        _telegramBotClient = new TelegramBotClient(telegramBotToken);
         _telegramBotClient.OnMessage += Bot_OnMessage;
         _telegramBotClient.StartReceiving();
 
-        await LoadConfig();
+        await LoadConfig(configFilePath);
 
         while (true)
         {
+            await UpdateTweets(_rapidApiKey);
+            await Task.Delay(TimeSpan.FromHours(1));
+        }
+    }
+
+    static async Task UpdateTweets(string rapidApiKey)
+    {
+        foreach (var username in _lastTweetIds.Keys.ToList())
+        {
             try
             {
-                foreach (var username in _lastTweetIds.Keys.ToList())
-                {
-                    string newTweetId = await GetLatestTweetId(username);
+                string? newTweetId = await GetLatestTweetId(username, rapidApiKey);
 
-                    if (!string.IsNullOrEmpty(newTweetId))
-                    {
-                        _lastTweetIds[username] = newTweetId;
-                    }
+                if (!string.IsNullOrEmpty(newTweetId) && newTweetId != _lastTweetIds[username])
+                {
+                    _lastTweetIds[username] = newTweetId;
+                    await SendTelegramMessage(username, newTweetId);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Ошибка при получении твита: {ex.Message}");
             }
-
-            await Task.Delay(TimeSpan.FromSeconds(10));
         }
     }
 
-    static async Task<string> GetLatestTweetId(string username)
+    static async Task<string> GetLatestTweetId(string username, string rapidApiKey)
     {
-        string url = $"https://twitter154.p.rapidapi.com/user/tweets?username={username}&limit=1&include_replies=false&include_pinned=false";
+        string url = $"https://twitter154.p.rapidapi.com/user/tweets?username={username}&limit=3&include_replies=false&include_pinned=false";
 
         var request = new HttpRequestMessage
         {
@@ -64,43 +72,44 @@ class Program
             RequestUri = new Uri(url),
             Headers =
             {
-                { "X-RapidAPI-Key", RapidApiKey },
+                { "X-RapidAPI-Key", rapidApiKey },
                 { "X-RapidAPI-Host", "twitter154.p.rapidapi.com" }
             }
         };
 
         using (var response = await Client.SendAsync(request))
         {
-            response.EnsureSuccessStatusCode();
             var body = await response.Content.ReadAsStringAsync();
 
-            Console.WriteLine(body); // Вывод полного JSON-ответа
-
-            string tweetId = ParseLatestTweetIdFromBody(body);
-            string lastTweetId = _lastTweetIds[username];
-
-            if (tweetId != lastTweetId)
+            if (!response.IsSuccessStatusCode)
             {
-                SendTelegramMessage(username, tweetId);
-                return tweetId;
+                Console.WriteLine($"Failed to get tweets for {username}. Status code: {response.StatusCode}. Body: {body}");
+                return string.Empty;
             }
 
+            var jsonDocument = JsonDocument.Parse(body);
+            var resultsArray = jsonDocument.RootElement.GetProperty("results");
+
+            if (resultsArray.GetArrayLength() > 0)
+            {
+                if (resultsArray[0].TryGetProperty("tweet_id", out var tweetIdProperty))
+                {
+                    string tweetId = tweetIdProperty.GetString() ?? string.Empty;
+
+                    // Add pretty print output
+                    string tweetUrl = $"https://twitter.com/{username}/status/{tweetId}";
+                    Console.WriteLine($"New tweet from {username}: {tweetUrl}");
+
+                    return tweetId;
+                }
+
+                if (resultsArray[0].TryGetProperty("text", out var tweetTextProperty))
+                {
+                    Console.WriteLine($"Tweet text: {tweetTextProperty.GetString()}");
+                }
+            }
             return string.Empty;
         }
-    }
-
-    static string ParseLatestTweetIdFromBody(string responseBody)
-    {
-        var jsonDocument = JsonDocument.Parse(responseBody);
-        var resultsArray = jsonDocument.RootElement.GetProperty("results");
-
-        if (resultsArray.GetArrayLength() > 0)
-        {
-            var tweetId = resultsArray[0].GetProperty("tweet_id").GetString(); // Получение tweetId
-            return tweetId;
-        }
-
-        return string.Empty;
     }
 
     static async Task SendTelegramMessage(string username, string tweetId)
@@ -108,13 +117,14 @@ class Program
         string tweetUrl = $"https://twitter.com/{username}/status/{tweetId}";
         string message = $"@{username}{Environment.NewLine}Открыть твит: {tweetUrl}";
 
-        await _telegramBotClient.SendTextMessageAsync(TelegramChatId, message);
+        await _telegramBotClient.SendTextMessageAsync(_telegramChatId, message);
     }
 
     static async void Bot_OnMessage(object? sender, MessageEventArgs e)
     {
-        // Обработка входящих сообщений от Telegram бота
         var message = e.Message;
+        string configFilePath = Configuration["ConfigFilePath"];
+
         if (message.Type == MessageType.Text)
         {
             if (message.Text.StartsWith("/add"))
@@ -124,7 +134,7 @@ class Program
                 {
                     _lastTweetIds[username] = string.Empty;
                     await _telegramBotClient.SendTextMessageAsync(message.Chat.Id, $"Аккаунт {username} добавлен в список отслеживаемых.");
-                    await SaveConfig();
+                    await SaveConfig(configFilePath);
                 }
                 else
                 {
@@ -138,7 +148,7 @@ class Program
                 {
                     _lastTweetIds.Remove(username);
                     await _telegramBotClient.SendTextMessageAsync(message.Chat.Id, $"Аккаунт {username} удален из списка отслеживаемых.");
-                    await SaveConfig();
+                    await SaveConfig(configFilePath);
                 }
                 else
                 {
@@ -154,18 +164,32 @@ class Program
         }
     }
 
-    static async Task LoadConfig()
+    static async Task LoadConfig(string configFilePath)
     {
-        if (File.Exists(ConfigFilePath))
+        try
         {
-            string json = await File.ReadAllTextAsync(ConfigFilePath);
-            _lastTweetIds = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (File.Exists(configFilePath))
+            {
+                string json = await File.ReadAllTextAsync(configFilePath);
+                _lastTweetIds = JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка при загрузке конфигурации: {ex.Message}");
         }
     }
 
-    static async Task SaveConfig()
+    static async Task SaveConfig(string configFilePath)
     {
-        string json = JsonSerializer.Serialize(_lastTweetIds);
-        await File.WriteAllTextAsync(ConfigFilePath, json);
+        try
+        {
+            string json = JsonSerializer.Serialize(_lastTweetIds);
+            await File.WriteAllTextAsync(configFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка при сохранении конфигурации: {ex.Message}");
+        }
     }
 }
